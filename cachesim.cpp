@@ -6,6 +6,7 @@
 #include <vector>
 #include <cmath>
 #include <bitset>
+#include "binary.h"
 #include <iomanip>
 #include <list>
 
@@ -28,36 +29,6 @@ unsigned long long addr;	// Miss address (64 bits)
 
 unsigned pc;	// Program counter of load/store instruction that missed (32 bits)
 };
-
-//create a mask st first a digit remain.
-//11010101... -> 110000.... for a =2 if we apply the mask
-u_int64_t createMask(u_int64_t a){
-    u_int64_t  mask;
-    //we have to use 1ull because standard shifting in cplusplus works for 32 bit only(?)
-    mask = ((1ULL << a) - 1)<<(64-a);
-    //std::bitset<64> b(mask);
-    //std::cout<<"mask"<<" "<<b<<std::endl;
-    return mask;
-}
-
-
-u_int64_t getFirstNbits(u_int64_t addr, u_int64_t a){
-    u_int64_t m = createMask(a);
-    //11010101... -> 110000.... for a =2 if we apply the mask
-    u_int64_t value = addr & m;
-    //std::bitset<64> b(value);
-    //std::cout<<"value"<<" "<<b<<std::endl;
-    //shift right to remove the trailing zeros
-    //110000.... -> 11 for a =2 if we apply the mask
-    return value>>(64-a);
-}
-
-u_int64_t getLastNbits(u_int64_t addr, u_int64_t a){
-    u_int64_t m;
-    m = (1ULL << a)-1;
-
-    return addr & m;
-}
 
 struct cacheBlock{
   bool valid;
@@ -227,6 +198,7 @@ public:
     return (sum<<(int)(this->configParams.blockLen));
   }
 
+  //info functions
   void PrintConfig(){
     cout << left
        << setw(20) << "Level"<< setw(20)<<configParams.level<<endl;
@@ -283,12 +255,114 @@ public:
   vector<std::list<int>> LRUList;
 };
 
+void Driver(Cache* L2c, Cache* L3c, char* filename, int numtraces, int option){
+  switch(option){
+    case 1:
+      cout<< "-----------FILE: "<<filename<<" EXCLUSIVE-----------"<<endl;
+      break;
+    case 2:
+      cout<< "-----------FILE: "<<filename<<" INCLUSIVE-----------"<<endl;
+      break;
+    case 3:
+      cout<< "-----------FILE: "<<filename<<" NINE-----------"<<endl;
+      break;
+  };
+  //reset the cache
+  L2c->Init();
+  L3c->Init();
+
+  for (int k=0; k<numtraces; k++) {
+      char input_name[80];
+      sprintf(input_name, "%s_%d", filename, k);
+      FILE * fp;
+      fp = fopen(input_name, "rb");
+      assert(fp != NULL);
+
+      // Process the entry
+      while (!feof(fp)) {
+        struct traceEntry te;
+        fread(&te.iord, sizeof(char), 1, fp);
+        fread(&te.type, sizeof(char), 1, fp);
+        fread(&te.addr, sizeof(unsigned long long), 1, fp);
+        fread(&te.pc, sizeof(unsigned), 1, fp);
+
+        switch(option){
+          case 1:
+          //exclusive
+          if(te.type){
+            cacheStatus c2 = L2c->Read(te.addr);
+            if(c2==MISS){
+              cacheStatus c3 = L3c->Read(te.addr);
+              if(c3==HIT){
+                //level3 hit
+                L3c->Invalidate(te.addr);
+              };
+              u_int64_t addrRem = L2c->Load(te.addr);
+              if(addrRem){
+                L3c->Load(te.addr);
+              }
+         }
+          };
+            break;
+          case 2:
+          //inclusive
+          if(te.type){
+            cacheStatus c2 = L2c->Read(te.addr);
+            if(c2==MISS){
+              cacheStatus c3 = L3c->Read(te.addr);
+              if(c3==MISS){
+                //level3 miss
+                u_int64_t addrRem = L3c->Load(te.addr);
+                if(addrRem){
+                  //invalidate in l2 if it exists.
+                  L2c->Invalidate(addrRem);
+                };
+              };
+              L2c->Load(te.addr);
+         }
+          };
+            break;
+          case 3:
+          //nine
+          if(te.type){
+            cacheStatus c2 = L2c->Read(te.addr);
+            if(c2==MISS){
+              cacheStatus c3 = L3c->Read(te.addr);
+              if(c3==MISS){
+                //l3 miss
+                u_int64_t addrRem = L3c->Load(te.addr);
+              }
+              else{
+                //l3hit
+                L3c->Invalidate(te.addr);
+              }
+               //l3 miss or hit, in any case fill it in l2
+              u_int64_t addrRem = L2c->Load(te.addr);
+              if(addrRem){
+                L3c->Load(te.addr);
+              };
+         };
+          };
+            break;
+        };
+
+    }
+      fclose(fp);
+      printf("Done reading file %d!\n", k);
+    }
+
+
+  L2c->PrintStats();
+  L3c->PrintStats();
+  return;
+}
+
 //Assumptions:
 //if trace.type is zero it was a hit in L1 we wont count it as a miss. So no updation of L2orL3
 int main(int argc, char** argv){
   config L2config = {2,64,8,(512*1024)}; //{level, blocksize, assoc, total cache size}
   Cache L2c(L2config);
-  L2c.Init();
+  //L2c.Init();
   cout<< "-----------CACHE INFO-----------"<<endl;
   L2c.PrintConfig();
   cout<<"---------"<<endl;
@@ -296,138 +370,15 @@ int main(int argc, char** argv){
 
   config L3config = {3,64,16,(2*1024*1024)}; //{level, blocksize, assoc, total cache size}
   Cache L3c(L3config);
-  L3c.Init();
+  //L3c.Init();
   L3c.PrintConfig();
 
   int numtraces = atoi(argv[2]);
-  char input_name[80];
 
-  //inclusive
-  for (int k=0; k<numtraces; k++) {
-      sprintf(input_name, "%s_%d", argv[1], k);
-      FILE * fp;
-      fp = fopen(input_name, "rb");
-      assert(fp != NULL);
-
-      // Process the entry
-      while (!feof(fp)) {
-        struct traceEntry te;
-        fread(&te.iord, sizeof(char), 1, fp);
-        fread(&te.type, sizeof(char), 1, fp);
-        fread(&te.addr, sizeof(unsigned long long), 1, fp);
-        fread(&te.pc, sizeof(unsigned), 1, fp);
-
-         //inclusive
-         if(te.type){
-           cacheStatus c2 = L2c.Read(te.addr);
-           if(c2==MISS){
-             cacheStatus c3 = L3c.Read(te.addr);
-             if(c3==MISS){
-               //level3 miss
-               u_int64_t addrRem = L3c.Load(te.addr);
-               if(addrRem){
-                 //invalidate in l2 if it exists.
-                 L2c.Invalidate(addrRem);
-               };
-             };
-             L2c.Load(te.addr);
-        }
-         };
+  //drive
+  for (int k=0; k<3; k++) {
+      Driver(&L2c, &L3c, argv[1], numtraces, k+1);
     }
-      fclose(fp);
-      printf("Done reading file %d!\n", k);
-    }
-  cout<< "-----------FILE: "<<argv[1]<<" INCLUSIVE-----------"<<endl;
-  L2c.PrintStats();
-  L3c.PrintStats();
 
-  //reset the cache
-  L2c.Init();
-  L3c.Init();
-
-  //exclusive
-  for (int k=0; k<numtraces; k++) {
-      sprintf(input_name, "%s_%d", argv[1], k);
-      FILE * fp;
-      fp = fopen(input_name, "rb");
-      assert(fp != NULL);
-
-      // Process the entry
-      while (!feof(fp)) {
-        struct traceEntry te;
-        fread(&te.iord, sizeof(char), 1, fp);
-        fread(&te.type, sizeof(char), 1, fp);
-        fread(&te.addr, sizeof(unsigned long long), 1, fp);
-        fread(&te.pc, sizeof(unsigned), 1, fp);
-
-         //exclusive
-         if(te.type){
-           cacheStatus c2 = L2c.Read(te.addr);
-           if(c2==MISS){
-             cacheStatus c3 = L3c.Read(te.addr);
-             if(c3==HIT){
-               //level3 hit
-               L3c.Invalidate(te.addr);
-             };
-             u_int64_t addrRem = L2c.Load(te.addr);
-             if(addrRem){
-               L3c.Load(te.addr);
-             }
-        }
-         };
-    }
-      fclose(fp);
-      printf("Done reading file %d!\n", k);
-    }
-    cout<< "-----------FILE: "<<argv[1]<<" EXCLUSIVE-----------"<<endl;
-    L2c.PrintStats();
-    L3c.PrintStats();
-
-  //reset the cache
-  L2c.Init();
-  L3c.Init();
-
-  //NINE
-  for (int k=0; k<numtraces; k++) {
-      sprintf(input_name, "%s_%d", argv[1], k);
-      FILE * fp;
-      fp = fopen(input_name, "rb");
-      assert(fp != NULL);
-
-      // Process the entry
-      while (!feof(fp)) {
-        struct traceEntry te;
-        fread(&te.iord, sizeof(char), 1, fp);
-        fread(&te.type, sizeof(char), 1, fp);
-        fread(&te.addr, sizeof(unsigned long long), 1, fp);
-        fread(&te.pc, sizeof(unsigned), 1, fp);
-
-         //nine
-         if(te.type){
-           cacheStatus c2 = L2c.Read(te.addr);
-           if(c2==MISS){
-             cacheStatus c3 = L3c.Read(te.addr);
-             if(c3==MISS){
-               //l3 miss
-               u_int64_t addrRem = L3c.Load(te.addr);
-             }
-             else{
-               //l3hit
-               L3c.Invalidate(te.addr);
-             }
-              //l3 miss or hit, in any case fill it in l2
-             u_int64_t addrRem = L2c.Load(te.addr);
-             if(addrRem){
-               L3c.Load(te.addr);
-             };
-        };
-         };
-    }
-      fclose(fp);
-      printf("Done reading file %d!\n", k);
-    }
-    cout<< "-----------FILE: "<<argv[1]<<" NINE-----------"<<endl;
-    L2c.PrintStats();
-    L3c.PrintStats();
   return 0;
 }
